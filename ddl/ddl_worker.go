@@ -520,8 +520,11 @@ func jobNeedGC(job *model.Job) bool {
 			return false
 		}
 		switch job.Type {
-		case model.ActionDropSchema, model.ActionDropTable, model.ActionTruncateTable, model.ActionDropIndex, model.ActionDropPrimaryKey,
-			model.ActionDropTablePartition, model.ActionTruncateTablePartition, model.ActionDropColumn, model.ActionModifyColumn,
+		case model.ActionDropSchema, model.ActionDropTable,
+			model.ActionTruncateTable, model.ActionDropIndex,
+			model.ActionDropPrimaryKey,
+			model.ActionDropTablePartition, model.ActionTruncateTablePartition,
+			model.ActionDropColumn, model.ActionModifyColumn,
 			model.ActionAddIndex, model.ActionAddPrimaryKey,
 			model.ActionReorganizePartition:
 			return true
@@ -911,6 +914,10 @@ func (w *worker) countForError(err error, job *model.Job) error {
 	job.Error = toTError(err)
 	job.ErrorCount++
 
+	if job.IsPaused() || job.IsPausing() {
+		return nil
+	}
+
 	// If job is cancelled, we shouldn't return an error and shouldn't load DDL variables.
 	if job.State == model.JobStateCancelled {
 		logutil.Logger(w.logCtx).Info("[ddl] DDL job is cancelled normally", zap.Error(err))
@@ -952,15 +959,24 @@ func (w *worker) runDDLJob(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 	}()
 	if job.IsFinished() {
 		logutil.Logger(w.logCtx).Debug("[ddl] finish DDL job", zap.String("job", job.String()))
-		return
+		return 0, nil
 	}
+	if job.IsPaused() {
+		return 0, nil
+	}
+
 	// The cause of this job state is that the job is cancelled by client.
 	if job.IsCancelling() {
 		logutil.Logger(w.logCtx).Debug("[ddl] cancel DDL job", zap.String("job", job.String()))
 		return convertJob2RollbackJob(w, d, t, job)
 	}
 
-	if !job.IsRollingback() && !job.IsCancelling() {
+	if job.IsPausing() {
+		logutil.Logger(w.logCtx).Debug("[ddl] DDL job is pausing", zap.String("job", job.String()))
+		return pauseBackendJob(w, d, t, job)
+	}
+
+	if !job.IsRollingback() {
 		job.State = model.JobStateRunning
 	}
 
@@ -1197,7 +1213,8 @@ func waitSchemaSyncedForMDL(d *ddlCtx, job *model.Job, latestSchemaVersion int64
 // So here we get the latest schema version to make sure all servers' schema version update to the latest schema version
 // in a cluster, or to wait for 2 * lease time.
 func waitSchemaSynced(d *ddlCtx, job *model.Job, waitTime time.Duration) error {
-	if !job.IsRunning() && !job.IsRollingback() && !job.IsDone() && !job.IsRollbackDone() {
+	if !job.IsRunning() && !job.IsRollingback() && !job.IsDone() && !job.IsRollbackDone() &&
+		!job.IsPaused() && !job.IsPausing() {
 		return nil
 	}
 
@@ -1361,7 +1378,7 @@ func updateSchemaVersion(d *ddlCtx, t *meta.Meta, job *model.Job, multiInfos ...
 			if droppedIDs, ok := job.CtxVars[0].([]int64); ok {
 				if addedIDs, ok := job.CtxVars[1].([]int64); ok {
 					// to use AffectedOpts we need both new and old to have the same length
-					maxParts := mathutil.Max[int](len(droppedIDs), len(addedIDs))
+					maxParts := mathutil.Max(len(droppedIDs), len(addedIDs))
 					// Also initialize them to 0!
 					oldIDs := make([]int64, maxParts)
 					copy(oldIDs, droppedIDs)

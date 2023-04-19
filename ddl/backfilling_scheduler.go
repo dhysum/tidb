@@ -464,6 +464,11 @@ func (w *addIndexIngestWorker) HandleTask(rs idxRecResult) {
 		return
 	}
 	if !w.distribute {
+		if w.d.isReorgPaused(w.jobID) {
+			// Don't write the w.resultCh, we just want to do nothing here if
+			// the Job is in Paused/Pausing state
+			return
+		}
 		err := w.d.isReorgRunnable(w.jobID, false)
 		if err != nil {
 			result.err = err

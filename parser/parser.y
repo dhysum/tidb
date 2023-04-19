@@ -10705,6 +10705,20 @@ AdminStmt:
 			JobIDs: $5.([]int64),
 		}
 	}
+|	"ADMIN" "PAUSE" "DDL" "JOBS" NumList
+	{
+		$$ = &ast.AdminStmt{
+			Tp:     ast.AdminPauseDDLJobs,
+			JobIDs: $5.([]int64),
+		}
+	}
+|	"ADMIN" "RESUME" "DDL" "JOBS" NumList
+	{
+		$$ = &ast.AdminStmt{
+			Tp:     ast.AdminResumeDDLJobs,
+			JobIDs: $5.([]int64),
+		}
+	}
 |	"ADMIN" "SHOW" "DDL" "JOB" "QUERIES" NumList
 	{
 		$$ = &ast.AdminStmt{

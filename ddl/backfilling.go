@@ -285,6 +285,12 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 	rc := d.getReorgCtx(jobID)
 
 	for {
+		// Or time.Sleep(model.JobStateCheckInterval) ?
+		if d.isReorgPaused(jobID) {
+			result.err = dbterror.ErrPausedDDLJob
+			return result
+		}
+
 		// Give job chance to be canceled, if we not check it here,
 		// if there is panic in bf.BackfillData we will never cancel the job.
 		// Because reorgRecordTask may run a long time,
@@ -353,6 +359,13 @@ func (w *backfillWorker) run(d *ddlCtx, bf backfiller, job *model.Job) {
 			logutil.BgLogger().Info("[ddl] backfill worker exit on context done", zap.Stringer("worker", w))
 			return
 		}
+
+		// Shall we just return or break? It looks like the result is just for this task.
+		// Or time.Sleep(model.JobStateCheckInterval)
+		if d.isReorgPaused(job.ID) {
+			return
+		}
+
 		task, more := <-w.taskCh
 		if !more {
 			logutil.BgLogger().Info("[ddl] backfill worker exit", zap.Stringer("worker", w))
@@ -714,6 +727,12 @@ func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sess.Pool, t table.Physical
 
 	taskIDAlloc := newTaskIDAllocator()
 	for {
+		// Or, can we just return or break ?
+		// Or time.Sleep(model.JobStateCheckInterval)
+		if dc.isReorgPaused(job.ID) {
+			return dbterror.ErrPausedDDLJob
+		}
+
 		kvRanges, err := splitTableRanges(t, reorgInfo.d.store, startKey, endKey, backfillTaskChanSize)
 		if err != nil {
 			return errors.Trace(err)

@@ -281,6 +281,109 @@ func NewMultiSchemaInfo() *MultiSchemaInfo {
 	}
 }
 
+// JobState is for job state.
+type JobState int32
+
+// List job states.
+const (
+	JobStateNone    JobState = 0
+	JobStateRunning JobState = 1
+
+	// JobStateRollingback is the state to rollback
+	// When DDL encountered an unrecoverable error at reorganization state,
+	// some keys has been added already, we need to remove them.
+	JobStateRollingback  JobState = 2
+	JobStateRollbackDone JobState = 3
+	JobStateDone         JobState = 4
+	JobStateCancelled    JobState = 5
+	// JobStateSynced indicates that the job has been completed and synch the completion of this job
+	// has been synchronized to all servers.
+	JobStateSynced JobState = 6
+	// JobStateCancelling is used to mark the DDL job is cancelled by the client, but the DDL work hasn't handle it.
+	JobStateCancelling JobState = 7
+	// JobStateQueueing means the job has not yet been started.
+	JobStateQueueing JobState = 8
+
+	JobStatePaused  JobState = 9
+	JobStatePausing JobState = 10
+)
+
+const (
+	JobStateCheckInterval = 50 * time.Millisecond
+)
+
+// String implements fmt.Stringer interface.
+func (s JobState) String() string {
+	switch s {
+	case JobStateRunning:
+		return "running"
+	case JobStateRollingback:
+		return "rollingback"
+	case JobStateRollbackDone:
+		return "rollback done"
+	case JobStateDone:
+		return "done"
+	case JobStateCancelled:
+		return "cancelled"
+	case JobStateCancelling:
+		return "cancelling"
+	case JobStateSynced:
+		return "synced"
+	case JobStateQueueing:
+		return "queueing"
+	case JobStatePaused:
+		return "paused"
+	case JobStatePausing:
+		return "pausing"
+	default:
+		return "none"
+	}
+}
+
+// StrToJobState converts string to JobState.
+func StrToJobState(s string) JobState {
+	switch s {
+	case "running":
+		return JobStateRunning
+	case "rollingback":
+		return JobStateRollingback
+	case "rollback done":
+		return JobStateRollbackDone
+	case "done":
+		return JobStateDone
+	case "cancelled":
+		return JobStateCancelled
+	case "cancelling":
+		return JobStateCancelling
+	case "synced":
+		return JobStateSynced
+	case "queueing":
+		return JobStateQueueing
+	case "paused":
+		return JobStatePaused
+	case "pausing":
+		return JobStatePausing
+	default:
+		return JobStateNone
+	}
+}
+
+// AdminCommandOperator indicates where the Cancel/Pause/Resume command on DDL
+// jobs comes from
+type AdminCommandOperator int
+
+const (
+	// AdminCommandByNotKnown indicates that unknow calling of the
+	// Cancel/Pause/Resume on DDL job
+	AdminCommandByNotKnown AdminCommandOperator = iota
+	// AdminCommandByEndUser indicates that the Cancel/Pause/Resume command on
+	// DDL job is issued by the end user
+	AdminCommandByEndUser
+	// AdminCommandBySystem indicates that the Cancel/Pause/Resume command on
+	// DDL job is issued by TiDB itself, such as Upgrade(bootstrap)
+	AdminCommandBySystem
+)
+
 // SubJob is a representation of one DDL schema change. A Job may contain zero(when multi-schema change is not applicable) or more SubJobs.
 type SubJob struct {
 	Type        ActionType      `json:"type"`
@@ -315,6 +418,16 @@ func (sub *SubJob) IsFinished() bool {
 		sub.State == JobStateCancelled
 }
 
+// IsPaused indicates whether the sub-job is paused
+func (sub *SubJob) IsPaused() bool {
+	return sub.State == JobStatePaused
+}
+
+// IsPausing indicates whether the sub-job is pausing
+func (sub *SubJob) IsPausing() bool {
+	return sub.State == JobStatePausing
+}
+
 // ToProxyJob converts a sub-job to a proxy job.
 func (sub *SubJob) ToProxyJob(parentJob *Job) Job {
 	return Job{
@@ -346,6 +459,7 @@ func (sub *SubJob) ToProxyJob(parentJob *Job) Job {
 		SeqNum:          parentJob.SeqNum,
 		Charset:         parentJob.Charset,
 		Collate:         parentJob.Collate,
+		AdminOperator:   parentJob.AdminOperator,
 	}
 }
 
@@ -385,30 +499,27 @@ type Job struct {
 	State      JobState      `json:"state"`
 	Warning    *terror.Error `json:"warning"`
 	Error      *terror.Error `json:"err"`
-	// ErrorCount will be increased, every time we meet an error when running job.
-	ErrorCount int64 `json:"err_count"`
-	// RowCount means the number of rows that are processed.
-	RowCount int64      `json:"row_count"`
-	Mu       sync.Mutex `json:"-"`
-	// CtxVars are variables attached to the job. It is for internal usage.
+	ErrorCount int64         `json:"err_count"` // increase on error happened during job running.
+	RowCount   int64         `json:"row_count"` // the number of rows that are processed.
+	Mu         sync.Mutex    `json:"-"`
+
+	// CtxVars are variables attached to the job, internal usage.
 	// E.g. passing arguments between functions by one single *Job pointer.
 	CtxVars []interface{} `json:"-"`
 	Args    []interface{} `json:"-"`
 	// RawArgs : We must use json raw message to delay parsing special args.
 	RawArgs     json.RawMessage `json:"raw_args"`
 	SchemaState SchemaState     `json:"schema_state"`
-	// SnapshotVer means snapshot version for this job.
-	SnapshotVer uint64 `json:"snapshot_ver"`
-	// RealStartTS uses timestamp allocated by TSO.
-	// Now it's the TS when we actually start the job.
+	SnapshotVer uint64          `json:"snapshot_ver"` // SnapshotVer indicates the snapshot for this job.
+
+	// The TS when the job actually starts, allocated by TSO
 	RealStartTS uint64 `json:"real_start_ts"`
-	// StartTS uses timestamp allocated by TSO.
-	// Now it's the TS when we put the job to TiKV queue.
-	StartTS uint64 `json:"start_ts"`
-	// DependencyID is the job's ID that the current job depends on.
-	DependencyID int64 `json:"dependency_id"`
-	// Query string of the ddl job.
-	Query      string       `json:"query"`
+
+	// The TS when the job is pushed into TiKV queue, allocated by TSO
+	StartTS      uint64 `json:"start_ts"`
+	DependencyID int64  `json:"dependency_id"` // which the current jobs depend on.
+
+	Query      string       `json:"query"` // Query to fetch the ddl jobs.
 	BinlogInfo *HistoryInfo `json:"binlog"`
 
 	// Version indicates the DDL job version. For old jobs, it will be 0.
@@ -420,16 +531,20 @@ type Job struct {
 	// MultiSchemaInfo keeps some warning now for multi schema change.
 	MultiSchemaInfo *MultiSchemaInfo `json:"multi_schema_info"`
 
-	// Priority is only used to set the operation priority of adding indices.
+	// Priority of adding indexes.
 	Priority int `json:"priority"`
 
-	// SeqNum is the total order in all DDLs, it's used to identify the order of DDL.
+	// SeqNum is to identify the order of all DDL.
 	SeqNum uint64 `json:"seq_num"`
 
 	// Charset is the charset when the DDL Job is created.
 	Charset string `json:"charset"`
 	// Collate is the collation the DDL Job is created.
 	Collate string `json:"collate"`
+
+	// AdminOperator indicates where the Admin command comes, by the TiDB
+	// itself (AdminCommandBySystem) or by user (AdminCommandByEndUser)
+	AdminOperator AdminCommandOperator `json:"admin_operator"`
 }
 
 // FinishTableJob is called when a job is finished.
@@ -714,12 +829,18 @@ func (job *Job) IsDependentOn(other *Job) (bool, error) {
 // IsFinished returns whether job is finished or not.
 // If the job state is Done or Cancelled, it is finished.
 func (job *Job) IsFinished() bool {
-	return job.State == JobStateDone || job.State == JobStateRollbackDone || job.State == JobStateCancelled
+	return job.State == JobStateDone || job.State == JobStateRollbackDone ||
+		job.State == JobStateCancelled || job.State == JobStateSynced
 }
 
 // IsCancelled returns whether the job is cancelled or not.
 func (job *Job) IsCancelled() bool {
 	return job.State == JobStateCancelled
+}
+
+// IsCancelling returns whether the job is cancelling or not.
+func (job *Job) IsCancelling() bool {
+	return job.State == JobStateCancelling
 }
 
 // IsRollbackDone returns whether the job is rolled back or not.
@@ -732,9 +853,14 @@ func (job *Job) IsRollingback() bool {
 	return job.State == JobStateRollingback
 }
 
-// IsCancelling returns whether the job is cancelling or not.
-func (job *Job) IsCancelling() bool {
-	return job.State == JobStateCancelling
+// IsPaused returns whether the job is paused
+func (job *Job) IsPaused() bool {
+	return job.State == JobStatePaused
+}
+
+// IsPausing indicates whether the job is pausing
+func (job *Job) IsPausing() bool {
+	return job.State == JobStatePausing
 }
 
 // IsSynced returns whether the DDL modification is synced among all TiDB servers.
@@ -750,11 +876,6 @@ func (job *Job) IsDone() bool {
 // IsRunning returns whether job is still running or not.
 func (job *Job) IsRunning() bool {
 	return job.State == JobStateRunning
-}
-
-// IsQueueing returns whether job is queuing or not.
-func (job *Job) IsQueueing() bool {
-	return job.State == JobStateQueueing
 }
 
 // NotStarted returns true if the job is never run by a worker.
@@ -822,75 +943,14 @@ func (job *Job) IsRollbackable() bool {
 	return true
 }
 
-// JobState is for job state.
-type JobState byte
-
-// List job states.
-const (
-	JobStateNone    JobState = 0
-	JobStateRunning JobState = 1
-	// When DDL encountered an unrecoverable error at reorganization state,
-	// some keys has been added already, we need to remove them.
-	// JobStateRollingback is the state to do the rolling back job.
-	JobStateRollingback  JobState = 2
-	JobStateRollbackDone JobState = 3
-	JobStateDone         JobState = 4
-	JobStateCancelled    JobState = 5
-	// JobStateSynced is used to mark the information about the completion of this job
-	// has been synchronized to all servers.
-	JobStateSynced JobState = 6
-	// JobStateCancelling is used to mark the DDL job is cancelled by the client, but the DDL work hasn't handle it.
-	JobStateCancelling JobState = 7
-	// JobStateQueueing means the job has not yet been started.
-	JobStateQueueing JobState = 8
-)
-
-// String implements fmt.Stringer interface.
-func (s JobState) String() string {
-	switch s {
-	case JobStateRunning:
-		return "running"
-	case JobStateRollingback:
-		return "rollingback"
-	case JobStateRollbackDone:
-		return "rollback done"
-	case JobStateDone:
-		return "done"
-	case JobStateCancelled:
-		return "cancelled"
-	case JobStateCancelling:
-		return "cancelling"
-	case JobStateSynced:
-		return "synced"
-	case JobStateQueueing:
-		return "queueing"
-	default:
-		return "none"
-	}
+// IsPausable checks whether we can pause the job
+func (job *Job) IsPausable() bool {
+	return (job.NotStarted() || job.IsRunning()) && job.IsRollbackable()
 }
 
-// StrToJobState converts string to JobState.
-func StrToJobState(s string) JobState {
-	switch s {
-	case "running":
-		return JobStateRunning
-	case "rollingback":
-		return JobStateRollingback
-	case "rollback done":
-		return JobStateRollbackDone
-	case "done":
-		return JobStateDone
-	case "cancelled":
-		return JobStateCancelled
-	case "cancelling":
-		return JobStateCancelling
-	case "synced":
-		return JobStateSynced
-	case "queueing":
-		return JobStateQueueing
-	default:
-		return JobStateNone
-	}
+// IsResumable checks whether the job can be rollback.
+func (job *Job) IsResumable() bool {
+	return job.IsPaused()
 }
 
 // SchemaDiff contains the schema modification at a particular schema version.

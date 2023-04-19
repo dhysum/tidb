@@ -1367,8 +1367,15 @@ func (*TableImporter) executeDDL(
 				return nil
 			case model.JobStateRunning, model.JobStateQueueing, model.JobStateNone:
 				logger.Info("ddl job is running", zap.Stringer("state", state))
-			default:
+			case model.JobStatePaused, model.JobStatePausing:
+				logger.Info("ddl job is paused or pausing", zap.Stringer("state", state))
+				return ddlErr
+			case model.JobStateCancelled, model.JobStateCancelling,
+				model.JobStateRollingback, model.JobStateRollbackDone:
 				logger.Warn("ddl job is canceled or rollbacked", zap.Stringer("state", state))
+				return ddlErr
+			default:
+				logger.Warn("ddl job is in unexpected state", zap.Stringer("state", state))
 				return ddlErr
 			}
 		}
@@ -1529,6 +1536,9 @@ func getDDLStatus(
 		if createTime.Before(minCreateTime) {
 			return nil, nil
 		}
+
+		// TODO: This could be a problem if there are two DDL job doing the same query
+		// e.g., create database if not exist dbpingcap
 		status.state = model.StrToJobState(state)
 	}
 	return status, errors.Trace(rows.Err())

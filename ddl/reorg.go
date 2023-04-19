@@ -65,7 +65,8 @@ type reorgCtx struct {
 	// notifyCancelReorgJob is used to notify the backfilling goroutine if the DDL job is cancelled.
 	// 0: job is not canceled.
 	// 1: job is canceled.
-	notifyCancelReorgJob int32
+	// notifyCancelReorgJob int32
+	jobState model.JobState
 
 	mu struct {
 		sync.Mutex
@@ -94,12 +95,18 @@ const defaultWaitReorgTimeout = 10 * time.Second
 // ReorgWaitTimeout is the timeout that wait ddl in write reorganization stage.
 var ReorgWaitTimeout = 5 * time.Second
 
-func (rc *reorgCtx) notifyReorgCancel() {
-	atomic.StoreInt32(&rc.notifyCancelReorgJob, 1)
+func (rc *reorgCtx) notifyJobState(state model.JobState) {
+	atomic.StoreInt32((*int32)(&rc.jobState), int32(state))
 }
 
 func (rc *reorgCtx) isReorgCanceled() bool {
-	return atomic.LoadInt32(&rc.notifyCancelReorgJob) == 1
+	return int32(model.JobStateCancelled) == atomic.LoadInt32((*int32)(&rc.jobState)) ||
+		int32(model.JobStateCancelling) == atomic.LoadInt32((*int32)(&rc.jobState))
+}
+
+func (rc *reorgCtx) isReorgPaused() bool {
+	return int32(model.JobStatePaused) == atomic.LoadInt32((*int32)(&rc.jobState)) ||
+		int32(model.JobStatePausing) == atomic.LoadInt32((*int32)(&rc.jobState))
 }
 
 func (rc *reorgCtx) setRowCount(count int64) {
@@ -190,6 +197,10 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		if job.IsCancelling() {
 			return dbterror.ErrCancelledDDLJob
 		}
+
+		if job.IsPaused() || job.IsPausing() {
+			return dbterror.ErrPausedDDLJob
+		}
 		rc = w.newReorgCtx(reorgInfo.Job.ID, reorgInfo.Job.GetRowCount())
 		w.wg.Add(1)
 		go func() {
@@ -216,6 +227,12 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 			d.removeReorgCtx(job.ID)
 			return dbterror.ErrCancelledDDLJob
 		}
+
+		if rc.isReorgPaused() || terror.ErrorEqual(err, dbterror.ErrPausedDDLJob) {
+			d.removeReorgCtx(job.ID)
+			return dbterror.ErrPausedDDLJob
+		}
+
 		rowCount := rc.getRowCount()
 		if err != nil {
 			logutil.BgLogger().Warn("[ddl] run reorg job done", zap.Int64("handled rows", rowCount), zap.Error(err))
@@ -344,6 +361,10 @@ func getTableTotalCount(w *worker, tblInfo *model.TableInfo) int64 {
 	return rows[0].GetInt64(0)
 }
 
+func (dc *ddlCtx) isReorgPaused(jobID int64) bool {
+	return dc.getReorgCtx(jobID).isReorgPaused()
+}
+
 func (dc *ddlCtx) isReorgRunnable(jobID int64, isDistReorg bool) error {
 	if isChanClosed(dc.ctx.Done()) {
 		// Worker is closed. So it can't do the reorganization.
@@ -353,6 +374,11 @@ func (dc *ddlCtx) isReorgRunnable(jobID int64, isDistReorg bool) error {
 	if dc.getReorgCtx(jobID).isReorgCanceled() {
 		// Job is cancelled. So it can't be done.
 		return dbterror.ErrCancelledDDLJob
+	}
+
+	if dc.isReorgPaused(jobID) {
+		// TODO: Need to double check on what will happen after this
+		return dbterror.ErrPausedDDLJob
 	}
 
 	// If isDistReorg is true, we needn't check if it is owner.
@@ -668,6 +694,7 @@ func getReorgInfo(ctx *JobContext, d *ddlCtx, rh *reorgHandler, job *model.Job, 
 				job.SnapshotVer = 0
 				logutil.BgLogger().Warn("[ddl] get reorg info, the element does not exist", zap.String("job", job.String()))
 				if job.IsCancelling() {
+					logutil.BgLogger().Warn("[ddl] Job is cancelling or pausing", zap.String("job", job.String()))
 					return nil, nil
 				}
 			}

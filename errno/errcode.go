@@ -1112,6 +1112,7 @@ const (
 	ErrColumnInChange                     = 8245
 	ErrDDLSetting                         = 8246
 	ErrIngestFailed                       = 8247
+
 	// Resource group errors.
 	ErrResourceGroupExists            = 8248
 	ErrResourceGroupNotExists         = 8249
@@ -1133,4 +1134,8 @@ const (
 	ErrTiKVMaxTimestampNotSynced = 9011
 	ErrTiFlashServerTimeout      = 9012
 	ErrTiFlashServerBusy         = 9013
+
+	ErrCannotPauseDDLJob  = 9014
+	ErrCannotResumeDDLJob = 9015
+	ErrPausedDDLJob       = 9016
 )

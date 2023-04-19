@@ -128,9 +128,9 @@ func rollingbackModifyColumn(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job)
 	if needNotifyAndStopReorgWorker(job) {
 		// column type change workers are started. we have to ask them to exit.
 		logutil.Logger(w.logCtx).Info("[ddl] run the cancelling DDL job", zap.String("job", job.String()))
-		d.notifyReorgCancel(job)
+		d.notifyReorgJobStateChange(job)
 		// Give the this kind of ddl one more round to run, the dbterror.ErrCancelledDDLJob should be fetched from the bottom up.
-		return w.onModifyColumn(d, t, job)
+		return w.onModifyColumn(d, t, job) // Why do it again?
 	}
 	_, tblInfo, oldCol, jp, err := getModifyColumnInfo(t, job)
 	if err != nil {
@@ -244,8 +244,8 @@ func rollingbackAddIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, isP
 	if needNotifyAndStopReorgWorker(job) {
 		// add index workers are started. need to ask them to exit.
 		logutil.Logger(w.logCtx).Info("[ddl] run the cancelling DDL job", zap.String("job", job.String()))
-		d.notifyReorgCancel(job)
-		ver, err = w.onCreateIndex(d, t, job, isPK)
+		d.notifyReorgJobStateChange(job)
+		ver, err = w.onCreateIndex(d, t, job, isPK) // Why ??
 	} else {
 		// add index's reorg workers are not running, remove the indexInfo in tableInfo.
 		ver, err = convertNotReorgAddIdxJob2RollbackJob(d, t, job, dbterror.ErrCancelledDDLJob)
@@ -381,6 +381,20 @@ func rollingbackReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (ve
 
 	// addingDefinitions is also in tblInfo, here pass the tblInfo as parameter directly.
 	return convertAddTablePartitionJob2RollbackJob(d, t, job, dbterror.ErrCancelledDDLJob, tblInfo)
+}
+
+func pauseBackendJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {
+	switch job.Type {
+	case model.ActionAddIndex, model.ActionAddPrimaryKey:
+		if needNotifyAndStopReorgWorker(job) {
+			logutil.Logger(w.logCtx).Info("[DDL] pausing the DDL job", zap.String("job", job.String()))
+			d.notifyReorgJobStateChange(job)
+		}
+	default:
+	}
+
+	job.State = model.JobStatePaused
+	return 0, nil
 }
 
 func convertJob2RollbackJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {

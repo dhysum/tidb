@@ -845,6 +845,10 @@ func doReorgWorkForModifyColumn(w *worker, d *ddlCtx, t *meta.Meta, job *model.J
 		return w.updateCurrentElement(tbl, reorgInfo)
 	})
 	if err != nil {
+		if dbterror.ErrPausedDDLJob.Equal(err) {
+			return false, ver, err
+		}
+
 		if dbterror.ErrWaitReorgTimeout.Equal(err) {
 			// If timeout, we should return, check for the owner and re-wait job done.
 			return false, ver, nil

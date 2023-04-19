@@ -2579,6 +2579,10 @@ func doPartitionReorgWork(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tb
 		return w.reorgPartitionDataAndIndex(tbl, reorgInfo)
 	})
 	if err != nil {
+		if dbterror.ErrPausedDDLJob.Equal(err) {
+			return false, ver, errors.Trace(err)
+		}
+
 		if dbterror.ErrWaitReorgTimeout.Equal(err) {
 			// If timeout, we should return, check for the owner and re-wait job done.
 			return false, ver, nil
